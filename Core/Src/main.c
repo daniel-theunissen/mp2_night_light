@@ -21,7 +21,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -31,7 +33,19 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define RUN_DAC_ADC_TEST
+#define ADC_MAX    4095.0f
+#define R_FIXED    1600.0f	// Fixed divider resistor
+#define LDR_K      4.45e4f  // Photoresistor extracted parameter
+#define LDR_GAMMA  0.632f  // Photoresistor extracted parameter
+#define NUM_LEDS 3
+#define HIGH_LUX_THRESHOLD 60.0f
+#define LOW_LUX_THRESHOLD 3.0f
+#define RAMP_RATE 0.01f
+#ifdef RUN_DAC_ADC_TEST
+	#define STATIC_LSB_TOLERANCE 20
+	#define INVERSE_GAIN_ERROR 200
+#endif
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -51,7 +65,15 @@ TIM_HandleTypeDef htim2;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-
+#define BUFFER_SIZE 16
+uint16_t adc_buf[BUFFER_SIZE];
+static float lux;
+static const uint32_t LED_CH[NUM_LEDS] = {TIM_CHANNEL_1, TIM_CHANNEL_2, TIM_CHANNEL_3};
+static float current_brightness[NUM_LEDS];
+static uint32_t arr;
+#ifdef RUN_DAC_ADC_TEST
+  static uint32_t failures = 0;
+#endif
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -64,7 +86,14 @@ static void MX_USART2_UART_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
-
+static float Avg_ADC_Value(void);
+static float ADC_To_LUX(float n);
+static float Clamp_To_Range(float n, float min, float max);
+static void Update_LEDs(float lux);
+#ifdef RUN_DAC_ADC_TEST
+	static void DAC_ADC_Test(void);
+	int _write(int file, char *ptr, int len);
+#endif
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -108,7 +137,22 @@ int main(void)
   MX_TIM1_Init();
   MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
+  #ifdef RUN_DAC_ADC_TEST
+  	  DAC_ADC_Test();
+  #endif
 
+  HAL_TIM_Base_Start_IT(&htim2);
+
+  for (int i=0; i<3; i++) {
+	  HAL_TIM_PWM_Start(&htim2, LED_CH[i]);
+  }
+  arr = __HAL_TIM_GET_AUTORELOAD(&htim2);
+
+
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1); // Controls ADC sampling
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2); // Controls photoresistor divider
+
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_buf, BUFFER_SIZE);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -282,7 +326,7 @@ static void MX_TIM1_Init(void)
 
   /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
-  htim1.Init.Prescaler = 84;
+  htim1.Init.Prescaler = 83;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim1.Init.Period = 49999;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -308,7 +352,7 @@ static void MX_TIM1_Init(void)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM2;
-  sConfigOC.Pulse = 150;
+  sConfigOC.Pulse = 250;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
@@ -319,7 +363,7 @@ static void MX_TIM1_Init(void)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 175;
+  sConfigOC.Pulse = 275;
   if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
   {
     Error_Handler();
@@ -362,9 +406,9 @@ static void MX_TIM2_Init(void)
 
   /* USER CODE END TIM2_Init 1 */
   htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 8399;
+  htim2.Init.Prescaler = 83;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 4294967295;
+  htim2.Init.Period = 99;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
@@ -394,12 +438,10 @@ static void MX_TIM2_Init(void)
   {
     Error_Handler();
   }
-  sConfigOC.Pulse = 0;
   if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
   {
     Error_Handler();
   }
-  sConfigOC.Pulse = 4294967295;
   if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
   {
     Error_Handler();
@@ -510,7 +552,104 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
+{
+	lux = ADC_To_LUX(Avg_ADC_Value());
+	Update_LEDs(lux);
+}
 
+static float Avg_ADC_Value(void) {
+    uint32_t sum = 0;
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+    	sum += adc_buf[i];
+    }
+
+    return sum / (float)BUFFER_SIZE;
+}
+
+static void Update_LEDs(float lux) {
+	// Based on the lux thresholds, linearly interpolate the log of the current lux to get a 'darkness' value
+	float darkness = (logf(HIGH_LUX_THRESHOLD / lux) / logf(HIGH_LUX_THRESHOLD / LOW_LUX_THRESHOLD));
+	darkness = Clamp_To_Range(darkness, 0.0f, 1.0f) * NUM_LEDS;
+	for (int i=0; i<NUM_LEDS; i++) {
+		float target_brightness = Clamp_To_Range((darkness - i), 0.0f, 1.0f);
+		float diff = Clamp_To_Range(target_brightness - current_brightness[i], -RAMP_RATE, RAMP_RATE);
+		current_brightness[i] += diff;
+		__HAL_TIM_SET_COMPARE(&htim2, LED_CH[i], (uint32_t)(current_brightness[i]*current_brightness[i]*(arr+1)));
+	}
+}
+
+static float ADC_To_LUX(float n) {
+    if (n < 1.0f) {
+    	n = 1.0f;
+    }
+
+    if (n > 4094.0f) {
+    	n = 4094.0f;
+    }
+
+    float r_ldr = R_FIXED * ((ADC_MAX / n) - 1.0f);
+
+    if (r_ldr < 1.0f) {
+    	r_ldr = 1.0f;
+    }
+
+    float lux = powf(LDR_K / r_ldr, 1.0f / LDR_GAMMA);
+    // This was the characterized range so I don't trust the value outside
+    lux = Clamp_To_Range(lux, 1e-3f, 1120.0f);
+    return lux;
+}
+
+static float Clamp_To_Range(float n, float min, float max) {
+	return (fminf(fmaxf(n, min), max));
+}
+
+#ifdef RUN_DAC_ADC_TEST
+static void DAC_ADC_Test(void) {
+	// TBH I used chat to find out about this API
+	// But the idea is that I want to just use software polling for the test
+	// because it makes it less error-prone and AFAIK is okay given the requirements
+	hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+	hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+	HAL_ADC_Init(&hadc1);
+
+	ADC_ChannelConfTypeDef sConfig = {0};
+	sConfig.Channel = ADC_CHANNEL_4; // This is the sauce that makes hooks it up to the DAC
+	sConfig.Rank = 1;
+	HAL_ADC_ConfigChannel(&hadc1, &sConfig);
+
+	HAL_DAC_Start(&hdac, DAC_CHANNEL_1);
+
+	for (int32_t dac_code=0; dac_code<4096; dac_code++) {
+		HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, dac_code);
+		HAL_Delay(2);
+		uint32_t sum = 0;
+		for (int i=0; i<16; i++) {
+			HAL_ADC_Start(&hadc1);
+			HAL_ADC_PollForConversion(&hadc1, 5);
+			sum += HAL_ADC_GetValue(&hadc1);
+		}
+		int32_t AVG_ADC_Value = sum/16;
+		int32_t LSB_Tolerance = STATIC_LSB_TOLERANCE + (dac_code/INVERSE_GAIN_ERROR);
+
+		if (abs(dac_code - AVG_ADC_Value) > LSB_Tolerance) {
+			failures++;
+			HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
+			printf("FAIL dac_code=%lu AVG_ADC_Value=%ld\r\n", (unsigned long)dac_code, (long)AVG_ADC_Value);
+		}
+	}
+
+	HAL_DAC_Stop(&hdac, DAC_CHANNEL_1);
+	MX_ADC1_Init(); // Put everything back to how it was
+}
+
+int _write(int file, char *ptr, int len)
+{
+    while (HAL_UART_Transmit(&huart2, (uint8_t *)ptr, len, HAL_MAX_DELAY) == HAL_BUSY) { }
+    return len;
+}
+
+#endif
 /* USER CODE END 4 */
 
 /**
