@@ -22,6 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <math.h>
+#include <stdlib.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -31,6 +32,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define RUN_DAC_ADC_TEST
 #define ADC_MAX    4095.0f
 #define R_FIXED    1600.0f	// Fixed divider resistor
 #define LDR_K      4.45e4f  // Photoresistor extracted parameter
@@ -39,6 +41,9 @@
 #define HIGH_LUX_THRESHOLD 60.0f
 #define LOW_LUX_THRESHOLD 3.0f
 #define RAMP_RATE 0.01f
+#ifdef RUN_DAC_ADC_TEST
+	#define ADC_LSB_TOLERANCE 5
+#endif
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -64,6 +69,9 @@ static float lux;
 static const uint32_t LED_CH[NUM_LEDS] = {TIM_CHANNEL_1, TIM_CHANNEL_2, TIM_CHANNEL_3};
 static float current_brightness[NUM_LEDS];
 static uint32_t arr;
+#ifdef RUN_DAC_ADC_TEST
+  static uint32_t failures = 0;
+#endif
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -80,6 +88,9 @@ static float Avg_ADC_Value(void);
 static float ADC_To_LUX(float n);
 static float Clamp_To_Range(float n, float min, float max);
 static void Update_LEDs(float lux);
+#ifdef RUN_DAC_ADC_TEST
+	static void DAC_ADC_Test(void);
+#endif
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -123,6 +134,10 @@ int main(void)
   MX_TIM1_Init();
   MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
+  #ifdef RUN_DAC_ADC_TEST
+  	  DAC_ADC_Test();
+  #endif
+
   HAL_TIM_Base_Start_IT(&htim2);
 
   for (int i=0; i<3; i++) {
@@ -540,8 +555,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 	Update_LEDs(lux);
 }
 
-
-
 static float Avg_ADC_Value(void) {
     uint32_t sum = 0;
     for (int i = 0; i < BUFFER_SIZE; i++) {
@@ -552,7 +565,6 @@ static float Avg_ADC_Value(void) {
 }
 
 static void Update_LEDs(float lux) {
-
 	// Based on the lux thresholds, linearly interpolate the log of the current lux to get a 'darkness' value
 	float darkness = (logf(HIGH_LUX_THRESHOLD / lux) / logf(HIGH_LUX_THRESHOLD / LOW_LUX_THRESHOLD));
 	darkness = Clamp_To_Range(darkness, 0.0f, 1.0f) * NUM_LEDS;
@@ -589,6 +601,43 @@ static float Clamp_To_Range(float n, float min, float max) {
 	return (fminf(fmaxf(n, min), max));
 }
 
+#ifdef RUN_DAC_ADC_TEST
+static void DAC_ADC_Test(void) {
+	// TBH I used chat to find out about this API
+	// But the idea is that I want to just use software polling for the test
+	// because it makes it less error-prone and AFAIK is okay given the requirements
+	hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+	hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+	HAL_ADC_Init(&hadc1);
+
+	ADC_ChannelConfTypeDef sConfig = {0};
+	sConfig.Channel = ADC_CHANNEL_4; // This is the sauce that makes hooks it up to the DAC
+	sConfig.Rank = 1;
+	HAL_ADC_ConfigChannel(&hadc1, &sConfig);
+
+	HAL_DAC_Start(&hdac, DAC_CHANNEL_1);
+
+	for (int32_t dac_code=0; dac_code<4096; dac_code++) {
+		HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, dac_code);
+		HAL_Delay(2);
+		uint32_t sum = 0;
+		for (int i=0; i<16; i++) {
+			HAL_ADC_Start(&hadc1);
+			HAL_ADC_PollForConversion(&hadc1, 5);
+			sum += HAL_ADC_GetValue(&hadc1);
+		}
+		int32_t AVG_ADC_Value = sum/16;
+
+		if (abs(dac_code - AVG_ADC_Value) > ADC_LSB_TOLERANCE) {
+			failures++;
+			HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
+		}
+	}
+
+	HAL_DAC_Stop(&hdac, DAC_CHANNEL_1);
+	MX_ADC1_Init(); // Put everything back to how it was
+}
+#endif
 /* USER CODE END 4 */
 
 /**
