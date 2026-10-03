@@ -67,6 +67,7 @@ UART_HandleTypeDef huart2;
 /* USER CODE BEGIN PV */
 #define BUFFER_SIZE 16
 uint16_t adc_buf[BUFFER_SIZE];
+static uint8_t counter = 0;
 static float lux;
 static const uint32_t LED_CH[NUM_LEDS] = {TIM_CHANNEL_1, TIM_CHANNEL_2, TIM_CHANNEL_3};
 static float current_brightness[NUM_LEDS];
@@ -554,8 +555,13 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 {
-	lux = ADC_To_LUX(Avg_ADC_Value());
-	Update_LEDs(lux);
+	if (counter >= 500) {
+		counter = 0;
+		lux = ADC_To_LUX(Avg_ADC_Value());
+		Update_LEDs(lux);
+	} else {
+		counter++;
+	}
 }
 
 static float Avg_ADC_Value(void) {
