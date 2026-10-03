@@ -21,7 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <math.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -31,7 +31,14 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define ADC_MAX    4095.0f
+#define R_FIXED    1600.0f	// Fixed divider resistor
+#define LDR_K      4.45e4f  // Photoresistor extracted parameter
+#define LDR_GAMMA  0.632f  // Photoresistor extracted parameter
+#define NUM_LEDS 3
+#define HIGH_LUX_THRESHOLD 60.0f
+#define LOW_LUX_THRESHOLD 3.0f
+#define RAMP_RATE 0.01f
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -51,7 +58,12 @@ TIM_HandleTypeDef htim2;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-
+#define BUFFER_SIZE 16
+uint16_t adc_buf[BUFFER_SIZE];
+static float lux;
+static const uint32_t LED_CH[NUM_LEDS] = {TIM_CHANNEL_1, TIM_CHANNEL_2, TIM_CHANNEL_3};
+static float current_brightness[NUM_LEDS];
+static uint32_t arr;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -64,7 +76,10 @@ static void MX_USART2_UART_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
-
+static float Avg_ADC_Value(void);
+static float ADC_To_LUX(float n);
+static float Clamp_To_Range(float n, float min, float max);
+static void Update_LEDs(float lux);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -108,7 +123,18 @@ int main(void)
   MX_TIM1_Init();
   MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
+  HAL_TIM_Base_Start_IT(&htim2);
 
+  for (int i=0; i<3; i++) {
+	  HAL_TIM_PWM_Start(&htim2, LED_CH[i]);
+  }
+  arr = __HAL_TIM_GET_AUTORELOAD(&htim2);
+
+
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1); // Controls ADC sampling
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2); // Controls photoresistor divider
+
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_buf, BUFFER_SIZE);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -308,7 +334,7 @@ static void MX_TIM1_Init(void)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM2;
-  sConfigOC.Pulse = 150;
+  sConfigOC.Pulse = 250;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
@@ -319,7 +345,7 @@ static void MX_TIM1_Init(void)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 175;
+  sConfigOC.Pulse = 275;
   if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
   {
     Error_Handler();
@@ -362,9 +388,9 @@ static void MX_TIM2_Init(void)
 
   /* USER CODE END TIM2_Init 1 */
   htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 8399;
+  htim2.Init.Prescaler = 83;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 4294967295;
+  htim2.Init.Period = 99;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
@@ -394,12 +420,10 @@ static void MX_TIM2_Init(void)
   {
     Error_Handler();
   }
-  sConfigOC.Pulse = 0;
   if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
   {
     Error_Handler();
   }
-  sConfigOC.Pulse = 4294967295;
   if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
   {
     Error_Handler();
@@ -510,6 +534,60 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
+{
+	lux = ADC_To_LUX(Avg_ADC_Value());
+	Update_LEDs(lux);
+}
+
+
+
+static float Avg_ADC_Value(void) {
+    uint32_t sum = 0;
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+    	sum += adc_buf[i];
+    }
+
+    return sum / (float)BUFFER_SIZE;
+}
+
+static void Update_LEDs(float lux) {
+
+	// Based on the lux thresholds, linearly interpolate the log of the current lux to get a 'darkness' value
+	float darkness = (logf(HIGH_LUX_THRESHOLD / lux) / logf(HIGH_LUX_THRESHOLD / LOW_LUX_THRESHOLD));
+	darkness = Clamp_To_Range(darkness, 0.0f, 1.0f) * NUM_LEDS;
+	for (int i=0; i<NUM_LEDS; i++) {
+		float target_brightness = Clamp_To_Range((darkness - i), 0.0f, 1.0f);
+		float diff = Clamp_To_Range(target_brightness - current_brightness[i], -RAMP_RATE, RAMP_RATE);
+		current_brightness[i] += diff;
+		__HAL_TIM_SET_COMPARE(&htim2, LED_CH[i], (uint32_t)(current_brightness[i]*current_brightness[i]*arr));
+	}
+}
+
+static float ADC_To_LUX(float n) {
+    if (n < 1.0f) {
+    	n = 1.0f;
+    }
+
+    if (n > 4094.0f) {
+    	n = 4094.0f;
+    }
+
+    float r_ldr = R_FIXED * ((ADC_MAX / n) - 1.0f);
+
+    if (r_ldr < 1.0f) {
+    	r_ldr = 1.0f;
+    }
+
+    float lux = powf(LDR_K / r_ldr, 1.0f / LDR_GAMMA);
+    // This was the characterized range so I don't trust the value outside
+    lux = Clamp_To_Range(lux, 1e-3f, 1120.0f);
+    return lux;
+}
+
+static float Clamp_To_Range(float n, float min, float max) {
+	return (fminf(fmaxf(n, min), max));
+}
 
 /* USER CODE END 4 */
 
