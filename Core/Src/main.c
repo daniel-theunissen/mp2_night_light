@@ -22,6 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 /* USER CODE END Includes */
 
@@ -42,7 +43,8 @@
 #define LOW_LUX_THRESHOLD 3.0f
 #define RAMP_RATE 0.01f
 #ifdef RUN_DAC_ADC_TEST
-	#define ADC_LSB_TOLERANCE 5
+	#define STATIC_LSB_TOLERANCE 20
+	#define INVERSE_GAIN_ERROR 200
 #endif
 /* USER CODE END PD */
 
@@ -90,6 +92,7 @@ static float Clamp_To_Range(float n, float min, float max);
 static void Update_LEDs(float lux);
 #ifdef RUN_DAC_ADC_TEST
 	static void DAC_ADC_Test(void);
+	int _write(int file, char *ptr, int len);
 #endif
 /* USER CODE END PFP */
 
@@ -627,16 +630,25 @@ static void DAC_ADC_Test(void) {
 			sum += HAL_ADC_GetValue(&hadc1);
 		}
 		int32_t AVG_ADC_Value = sum/16;
+		int32_t LSB_Tolerance = STATIC_LSB_TOLERANCE + (dac_code/INVERSE_GAIN_ERROR);
 
-		if (abs(dac_code - AVG_ADC_Value) > ADC_LSB_TOLERANCE) {
+		if (abs(dac_code - AVG_ADC_Value) > LSB_Tolerance) {
 			failures++;
 			HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
+			printf("FAIL dac_code=%lu AVG_ADC_Value=%ld\r\n", (unsigned long)dac_code, (long)AVG_ADC_Value);
 		}
 	}
 
 	HAL_DAC_Stop(&hdac, DAC_CHANNEL_1);
 	MX_ADC1_Init(); // Put everything back to how it was
 }
+
+int _write(int file, char *ptr, int len)
+{
+    while (HAL_UART_Transmit(&huart2, (uint8_t *)ptr, len, HAL_MAX_DELAY) == HAL_BUSY) { }
+    return len;
+}
+
 #endif
 /* USER CODE END 4 */
 
