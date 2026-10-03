@@ -67,7 +67,6 @@ UART_HandleTypeDef huart2;
 /* USER CODE BEGIN PV */
 #define BUFFER_SIZE 16
 uint16_t adc_buf[BUFFER_SIZE];
-static uint8_t counter = 0;
 static float lux;
 static const uint32_t LED_CH[NUM_LEDS] = {TIM_CHANNEL_1, TIM_CHANNEL_2, TIM_CHANNEL_3};
 static float current_brightness[NUM_LEDS];
@@ -327,7 +326,7 @@ static void MX_TIM1_Init(void)
 
   /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
-  htim1.Init.Prescaler = 84;
+  htim1.Init.Prescaler = 83;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim1.Init.Period = 49999;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -555,13 +554,8 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 {
-	if (counter >= 500) {
-		counter = 0;
-		lux = ADC_To_LUX(Avg_ADC_Value());
-		Update_LEDs(lux);
-	} else {
-		counter++;
-	}
+	lux = ADC_To_LUX(Avg_ADC_Value());
+	Update_LEDs(lux);
 }
 
 static float Avg_ADC_Value(void) {
@@ -581,7 +575,7 @@ static void Update_LEDs(float lux) {
 		float target_brightness = Clamp_To_Range((darkness - i), 0.0f, 1.0f);
 		float diff = Clamp_To_Range(target_brightness - current_brightness[i], -RAMP_RATE, RAMP_RATE);
 		current_brightness[i] += diff;
-		__HAL_TIM_SET_COMPARE(&htim2, LED_CH[i], (uint32_t)(current_brightness[i]*current_brightness[i]*arr));
+		__HAL_TIM_SET_COMPARE(&htim2, LED_CH[i], (uint32_t)(current_brightness[i]*current_brightness[i]*(arr+1)));
 	}
 }
 
