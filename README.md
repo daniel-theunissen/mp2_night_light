@@ -31,3 +31,4 @@ There is a built-in DAC loopback test that runs before the main program which ca
 One challenge with this design is that the LEDs influence the reading of the photoresistor, thus creating a feedback loop. I observed some damped oscillations when the light level changed suddenly, which is expected. One way to potentially deal with this is to estimate the LUX contribution of each LED and subtract it out from the reading. This would require some additional characterization of the LEDs and a better idea of where they would be physically placed in relation to the photoresistor.
 
 # Register Trace
+[Find register trace here](register_trace.md)
